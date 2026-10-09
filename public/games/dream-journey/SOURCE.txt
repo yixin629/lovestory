@@ -1,0 +1,18 @@
+Source: https://github.com/liangtongzhuo/game_web
+
+This local-practice prototype reuses the background image and eight-direction
+character animation frames from the source project. The original Canvas demo
+was rewritten as a typed React/Next.js feature with desktop controls, NPCs,
+quests, combat, responsive rendering, and local save data.
+
+The following battle assets are original AI-assisted project artwork generated
+for this repository on 2026-09-01 and do not come from the upstream demo or any
+commercial game:
+
+- battle/arena-formation-v1.png
+- battle/partners-atlas-v1.png
+- battle/moon-lotus-actions-v1.webp
+- battle/moon-fox-actions-v1.webp
+
+Generation direction: original 2.5D Chinese-fantasy art, with no copied named
+characters, logos, UI, or source-game assets.

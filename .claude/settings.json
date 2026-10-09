@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm run lint)",
+      "Bash(npm run typecheck)",
+      "Bash(npm run build)",
+      "Bash(npm run check)",
+      "Bash(npm run cf:build)",
+      "Bash(curl -s http://localhost:3000/mahjong)",
+      "Bash(curl -s http://localhost:3000/gomoku)"
+    ]
+  }
+}
