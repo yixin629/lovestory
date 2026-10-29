@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react'
 import { supabase } from '@/lib/supabase'
 import BackButton from '@/app/components/ui/BackButton'
 import { useToast } from '@/app/components/feedback/ToastProvider'
@@ -16,6 +16,9 @@ interface ChatMessage {
   is_read: boolean
   created_at: string
 }
+
+// 每次加载的消息条数
+const PAGE_SIZE = 50
 
 // 快捷表情
 const QUICK_EMOJIS = [
@@ -73,8 +76,17 @@ export default function ChatPage() {
   const [showEmojis, setShowEmojis] = useState(false)
   const [showQuickMessages, setShowQuickMessages] = useState(false)
   const [unreadCount, setUnreadCount] = useState(0)
+  const [hasMore, setHasMore] = useState(false)
+  const [isLoadingOlder, setIsLoadingOlder] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const listRef = useRef<HTMLDivElement>(null)
+  const topSentinelRef = useRef<HTMLDivElement>(null)
+  const isLoadingOlderRef = useRef(false)
+  // 用户离开过顶部后才允许自动加载，避免首屏还没滚到底就连续触发
+  const autoLoadArmedRef = useRef(false)
+  // 加载更早消息前记录滚动位置，插入后保持视线停在原来的消息上
+  const scrollRestoreRef = useRef<{ scroller: Element; prevHeight: number; prevTop: number } | null>(null)
   const { showToast } = useToast()
 
   const { user: currentUser, me, partner, coupleId } = useAuth()
@@ -84,17 +96,24 @@ export default function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [])
 
+  // 追加消息并按 id 去重（发送回执和 Realtime 可能各来一次）
+  const appendMessage = useCallback((message: ChatMessage) => {
+    setMessages((prev) => (prev.some((m) => m.id === message.id) ? prev : [...prev, message]))
+  }, [])
+
   // 加载消息
   const loadMessages = useCallback(async () => {
     try {
       if (!currentUser) return // Wait for user
 
       setIsLoading(true)
+      autoLoadArmedRef.current = false
+      // 取最新的一页（倒序取再翻转），否则超过一页后新消息会被截掉
       const { data, error } = await supabase
         .from('chat_messages')
         .select('*')
-        .order('created_at', { ascending: true })
-        .limit(50)
+        .order('created_at', { ascending: false })
+        .limit(PAGE_SIZE)
 
       if (error) {
         // Check if error is due to missing table
@@ -107,7 +126,8 @@ export default function ChatPage() {
       }
 
       if (data) {
-        setMessages(data)
+        setMessages(data.reverse())
+        setHasMore(data.length === PAGE_SIZE)
         setTimeout(scrollToBottom, 500) // Delay scroll to ensure render
       }
     } catch (error) {
@@ -117,6 +137,80 @@ export default function ChatPage() {
       setIsLoading(false)
     }
   }, [currentUser, scrollToBottom, showToast])
+
+  const oldestCreatedAt = messages[0]?.created_at
+
+  // 加载更早的消息
+  const loadOlderMessages = useCallback(async () => {
+    if (!oldestCreatedAt || isLoadingOlderRef.current) return
+
+    isLoadingOlderRef.current = true
+    setIsLoadingOlder(true)
+    try {
+      const { data, error } = await supabase
+        .from('chat_messages')
+        .select('*')
+        .lt('created_at', oldestCreatedAt)
+        .order('created_at', { ascending: false })
+        .limit(PAGE_SIZE)
+
+      if (error) throw error
+
+      const older = (data ?? []).reverse()
+      setHasMore(older.length === PAGE_SIZE)
+      if (older.length === 0) return
+
+      const list = listRef.current
+      const scroller =
+        list && list.scrollHeight > list.clientHeight ? list : document.scrollingElement
+      if (scroller) {
+        scrollRestoreRef.current = {
+          scroller,
+          prevHeight: scroller.scrollHeight,
+          prevTop: scroller.scrollTop,
+        }
+      }
+
+      setMessages((prev) => {
+        const existing = new Set(prev.map((m) => m.id))
+        return [...older.filter((m) => !existing.has(m.id)), ...prev]
+      })
+    } catch (error) {
+      console.error('加载更早消息失败:', error)
+      showToast('加载更早消息失败', 'error')
+    } finally {
+      isLoadingOlderRef.current = false
+      setIsLoadingOlder(false)
+    }
+  }, [oldestCreatedAt, showToast])
+
+  // 插入更早消息后补偿滚动距离
+  useLayoutEffect(() => {
+    const restore = scrollRestoreRef.current
+    if (!restore) return
+    scrollRestoreRef.current = null
+    restore.scroller.scrollTop =
+      restore.prevTop + (restore.scroller.scrollHeight - restore.prevHeight)
+  }, [messages])
+
+  // 滚到顶部时自动加载更早消息
+  useEffect(() => {
+    const sentinel = topSentinelRef.current
+    if (!sentinel || isLoading || !hasMore) return
+
+    const observer = new IntersectionObserver((entries) => {
+      const entry = entries[0]
+      if (!entry) return
+      if (!entry.isIntersecting) {
+        autoLoadArmedRef.current = true
+        return
+      }
+      if (autoLoadArmedRef.current) void loadOlderMessages()
+    })
+    observer.observe(sentinel)
+
+    return () => observer.disconnect()
+  }, [isLoading, hasMore, loadOlderMessages])
 
   // 标记消息为已读
   const markAsRead = useCallback(async () => {
@@ -149,12 +243,7 @@ export default function ChatPage() {
           table: 'chat_messages',
         },
         (payload) => {
-          const newMessage = payload.new as ChatMessage
-          setMessages((prev) => [...prev, newMessage])
-          // 如果也是自己发的，可能会重复显示（如果本地已经optimistic update了）
-          // 但这里我们简单处理，filter distinct ids?
-          // 或者 relies on React key uniqueness if ID matches?
-          // To be safe, wait for real ID.
+          appendMessage(payload.new as ChatMessage)
           setTimeout(scrollToBottom, 100)
         }
       )
@@ -166,12 +255,13 @@ export default function ChatPage() {
     return () => {
       supabase.removeChannel(channel)
     }
-  }, [currentUser, coupleId, loadMessages, scrollToBottom, markAsRead])
+  }, [currentUser, coupleId, loadMessages, scrollToBottom, markAsRead, appendMessage])
 
-  // 消息更新后滚动到底部
+  // 有新消息（最后一条变化）时滚动到底部；向上加载更早消息不触发
+  const lastMessageId = messages[messages.length - 1]?.id
   useEffect(() => {
     scrollToBottom()
-  }, [messages, scrollToBottom])
+  }, [lastMessageId, scrollToBottom])
 
   // 计算未读消息
   useEffect(() => {
@@ -219,8 +309,8 @@ export default function ChatPage() {
         throw error
       }
 
-      console.log('Message sent successfully:', data)
-      // Realtime subscription will handle the UI update
+      // 不只依赖 Realtime：直接用插入结果更新界面，Realtime 重复推送会被去重
+      data?.forEach((m) => appendMessage(m as ChatMessage))
     } catch (error: any) {
       console.error('发送消息失败:', error)
       showToast(`发送失败: ${error.message || '未知错误'}`, 'error')
@@ -253,6 +343,7 @@ export default function ChatPage() {
       if (error) throw error
 
       setMessages([])
+      setHasMore(false)
       showToast('聊天记录已清空', 'success')
     } catch (error) {
       console.error('清空失败:', error)
@@ -377,7 +468,24 @@ export default function ChatPage() {
       </div>
 
       {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3 max-w-2xl mx-auto w-full">
+      <div ref={listRef} className="flex-1 overflow-y-auto p-4 space-y-3 max-w-2xl mx-auto w-full">
+        <div ref={topSentinelRef} aria-hidden="true" />
+        {!isLoading && messages.length > 0 && (
+          <div className="flex justify-center">
+            {isLoadingOlder ? (
+              <span className="text-xs text-gray-400">加载中…</span>
+            ) : hasMore ? (
+              <button
+                onClick={() => void loadOlderMessages()}
+                className="text-xs text-gray-400 hover:text-pink-500 transition-colors"
+              >
+                上滑或点击加载更早消息
+              </button>
+            ) : (
+              <span className="text-xs text-gray-300">没有更早的消息了</span>
+            )}
+          </div>
+        )}
         {isLoading ? (
           <div className="flex justify-center items-center h-full py-20">
             <LoadingSkeleton type="list" count={5} />
